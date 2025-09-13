@@ -58,6 +58,41 @@ export class GeneratorMetadataProvider {
   private readonly site: ExtensionSite;
   private readonly log: SemanticLogger;
 
+  /**
+   * Determines if the current instance is self-hosted by checking the current URL
+   * against known Bitwarden cloud domains.
+   */
+  private isSelfHostedInstance(): boolean {
+    // Check if we're in a browser environment
+    if (typeof window !== "undefined" && window.location) {
+      const hostname = window.location.hostname.toLowerCase();
+
+      // Known Bitwarden cloud domains
+      const cloudDomains = [
+        "vault.bitwarden.com",
+        "vault.bitwarden.eu",
+        "vault.bitwarden.ca",
+        "vault.bitwarden.com.au",
+        "vault.bitwarden.jp",
+        "bitwarden.com",
+        "bitwarden.eu",
+        "bitwarden.ca",
+        "bitwarden.com.au",
+        "bitwarden.jp",
+      ];
+
+      // If the hostname matches any cloud domain, it's not self-hosted
+      const isCloudDomain = cloudDomains.some(
+        (domain) => hostname === domain || hostname.endsWith("." + domain),
+      );
+
+      return !isCloudDomain;
+    }
+
+    // Fallback to the original PlatformUtilsService method
+    return this.application.environment.isSelfHost();
+  }
+
   private _metadata: Map<CredentialAlgorithm, GeneratorMetadata<unknown & object>>;
 
   /** Retrieve an algorithm's generator metadata
@@ -108,14 +143,42 @@ export class GeneratorMetadataProvider {
     if (isTypeRequest(requested)) {
       let forwarders: CredentialAlgorithm[] = [];
       if (requested.type === Type.email) {
-        forwarders = Array.from(this.site.extensions.keys()).map((forwarder) => ({ forwarder }));
+        // Filter out forwarders that don't support self-hosted instances when running on self-hosted
+        forwarders = Array.from(this.site.extensions.keys())
+          .filter((forwarder) => {
+            const extension = this.site.extensions.get(forwarder);
+            if (!extension) {
+              return false;
+            }
+
+            // If running on self-hosted instance, exclude forwarders that don't support self-hosting
+            const isSelfHosted = this.isSelfHostedInstance();
+            if (isSelfHosted) {
+              return extension.host.selfHost !== "never";
+            }
+
+            // On cloud instances, include all forwarders
+            return true;
+          })
+          .map((forwarder) => ({ forwarder }));
       }
 
       algorithms = AlgorithmsByType[requested.type].concat(forwarders);
     } else if (isAlgorithmRequest(requested) && isForwarderExtensionId(requested.algorithm)) {
-      algorithms = this.site.extensions.has(requested.algorithm.forwarder)
-        ? [requested.algorithm]
-        : [];
+      const extension = this.site.extensions.get(requested.algorithm.forwarder);
+      if (!extension) {
+        algorithms = [];
+      } else {
+        // If running on self-hosted instance, exclude forwarders that don't support self-hosting
+        const isValidForCurrentEnvironment = this.isSelfHostedInstance()
+          ? extension.host.selfHost !== "never"
+          : true; // On cloud instances, include all forwarders
+
+        algorithms =
+          this.site.extensions.has(requested.algorithm.forwarder) && isValidForCurrentEnvironment
+            ? [requested.algorithm]
+            : [];
+      }
     } else if (isAlgorithmRequest(requested)) {
       algorithms = Algorithms.includes(requested.algorithm) ? [requested.algorithm] : [];
     } else {
@@ -154,12 +217,25 @@ export class GeneratorMetadataProvider {
           );
         return policies$;
       }),
-      map(
-        (available) =>
-          function (a: CredentialAlgorithm) {
-            return isForwarderExtensionId(a) || available.has(a);
-          },
-      ),
+      map((available) => (a: CredentialAlgorithm) => {
+        if (isForwarderExtensionId(a)) {
+          // For forwarders, check if they're valid for the current environment
+          const extension = this.site.extensions.get(a.forwarder);
+          if (!extension) {
+            return false;
+          }
+
+          // If running on self-hosted instance, exclude forwarders that don't support self-hosting
+          const isSelfHosted = this.isSelfHostedInstance();
+          if (isSelfHosted) {
+            return extension.host.selfHost !== "never";
+          }
+
+          // On cloud instances, include all forwarders
+          return true;
+        }
+        return available.has(a);
+      }),
     );
 
     return available$;

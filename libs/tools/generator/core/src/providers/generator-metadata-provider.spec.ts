@@ -6,6 +6,7 @@ import { PolicyType } from "@bitwarden/common/admin-console/enums";
 import { Policy } from "@bitwarden/common/admin-console/models/domain/policy";
 import { Account } from "@bitwarden/common/auth/abstractions/account.service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
+import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { LegacyEncryptorProvider } from "@bitwarden/common/tools/cryptography/legacy-encryptor-provider";
 import { UserEncryptor } from "@bitwarden/common/tools/cryptography/user-encryptor.abstraction";
 import {
@@ -14,6 +15,7 @@ import {
   Site,
   SiteId,
   SiteMetadata,
+  VendorId,
 } from "@bitwarden/common/tools/extension";
 import { ExtensionService } from "@bitwarden/common/tools/extension/extension.service";
 import { Bitwarden } from "@bitwarden/common/tools/extension/vendor/bitwarden";
@@ -95,6 +97,8 @@ const SomeConfigService = mock<ConfigService>;
 
 const SomeSdkService = mock<BitwardenClient>;
 
+const SomeEnvironmentService = mock<PlatformUtilsService>();
+
 const ApplicationProvider = {
   /** Policy configured by the administrative console */
   policy: SomePolicyService,
@@ -107,6 +111,9 @@ const ApplicationProvider = {
 
   /** Feature flag retrieval */
   configService: SomeConfigService,
+
+  /** Platform Service to inspect runtime environment */
+  environment: SomeEnvironmentService,
 
   /** SDK access for password generation */
   sdk: SomeSdkService,
@@ -190,6 +197,128 @@ describe("GeneratorMetadataProvider", () => {
       const result = provider.algorithms({ type: Type.password });
 
       expect(result).toEqual(expect.arrayContaining(AlgorithmsByType[Type.password]));
+    });
+
+    it("excludes forwarders that don't support self-hosted instances when running on self-hosted", () => {
+      const nonSelfHostedExtensionMetadata: ExtensionMetadata = {
+        site: SomeSite,
+        product: { vendor: { id: "duckduckgo" as VendorId, name: "DuckDuckGo" } },
+        host: { authentication: true, selfHost: "never", baseUrl: "https://duckduckgo.com" },
+        requestedFields: [],
+      };
+      const application = {
+        ...ApplicationProvider,
+        extension: mock<ExtensionService>({
+          site: () =>
+            new ExtensionSite(
+              SomeSite,
+              new Map([["duckduckgo" as VendorId, nonSelfHostedExtensionMetadata]]),
+            ),
+        }),
+        environment: mock<PlatformUtilsService>({
+          isSelfHost: () => true, // Simulate self-hosted environment
+        }),
+      };
+      const provider = new GeneratorMetadataProvider(SystemProvider, application, []);
+
+      const result = provider.algorithms({ type: Type.email });
+
+      expect(result).not.toEqual(expect.arrayContaining([{ forwarder: "duckduckgo" as VendorId }]));
+    });
+
+    it("excludes forwarders that don't support self-hosted instances in algorithms$ when running on self-hosted", async () => {
+      const nonSelfHostedExtensionMetadata: ExtensionMetadata = {
+        site: SomeSite,
+        product: { vendor: { id: "duckduckgo" as VendorId, name: "DuckDuckGo" } },
+        host: { authentication: true, selfHost: "never", baseUrl: "https://duckduckgo.com" },
+        requestedFields: [],
+      };
+      const application = {
+        ...ApplicationProvider,
+        extension: mock<ExtensionService>({
+          site: () =>
+            new ExtensionSite(
+              SomeSite,
+              new Map([["duckduckgo" as VendorId, nonSelfHostedExtensionMetadata]]),
+            ),
+        }),
+        environment: mock<PlatformUtilsService>({
+          isSelfHost: () => true, // Simulate self-hosted environment
+        }),
+      };
+      const provider = new GeneratorMetadataProvider(SystemProvider, application, []);
+      const result = new ReplaySubject<CredentialAlgorithm[]>(1);
+
+      provider.algorithms$({ type: Type.email }, { account$: SomeAccount$ }).subscribe(result);
+
+      const algorithms = await firstValueFrom(result);
+      expect(algorithms).not.toEqual(
+        expect.arrayContaining([{ forwarder: "duckduckgo" as VendorId }]),
+      );
+    });
+
+    it("includes all forwarders when running on cloud instances", () => {
+      const nonSelfHostedExtensionMetadata: ExtensionMetadata = {
+        site: SomeSite,
+        product: { vendor: { id: "duckduckgo" as VendorId, name: "DuckDuckGo" } },
+        host: { authentication: true, selfHost: "never", baseUrl: "https://duckduckgo.com" },
+        requestedFields: [],
+      };
+      const application = {
+        ...ApplicationProvider,
+        extension: mock<ExtensionService>({
+          site: () =>
+            new ExtensionSite(
+              SomeSite,
+              new Map([["duckduckgo" as VendorId, nonSelfHostedExtensionMetadata]]),
+            ),
+        }),
+        environment: mock<PlatformUtilsService>({
+          isSelfHost: () => false, // Simulate cloud environment (not self-hosted)
+        }),
+      };
+      const provider = new GeneratorMetadataProvider(SystemProvider, application, []);
+
+      const result = provider.algorithms({ type: Type.email });
+
+      expect(result).toEqual(expect.arrayContaining([{ forwarder: "duckduckgo" as VendorId }]));
+    });
+
+    it("detects self-hosted instances by URL when PlatformUtilsService fails", () => {
+      // Mock window.location for browser environment
+      const mockLocation = {
+        hostname: "my-bitwarden.example.com",
+      };
+      Object.defineProperty(window, "location", {
+        value: mockLocation,
+        writable: true,
+      });
+
+      const nonSelfHostedExtensionMetadata: ExtensionMetadata = {
+        site: SomeSite,
+        product: { vendor: { id: "duckduckgo" as VendorId, name: "DuckDuckGo" } },
+        host: { authentication: true, selfHost: "never", baseUrl: "https://duckduckgo.com" },
+        requestedFields: [],
+      };
+      const application = {
+        ...ApplicationProvider,
+        extension: mock<ExtensionService>({
+          site: () =>
+            new ExtensionSite(
+              SomeSite,
+              new Map([["duckduckgo" as VendorId, nonSelfHostedExtensionMetadata]]),
+            ),
+        }),
+        environment: mock<PlatformUtilsService>({
+          isSelfHost: () => false, // PlatformUtilsService returns false (incorrect)
+        }),
+      };
+      const provider = new GeneratorMetadataProvider(SystemProvider, application, []);
+
+      const result = provider.algorithms({ type: Type.email });
+
+      // Should exclude DuckDuckGo because URL-based detection identifies it as self-hosted
+      expect(result).not.toEqual(expect.arrayContaining([{ forwarder: "duckduckgo" as VendorId }]));
     });
 
     it("returns the username category's algorithms", () => {

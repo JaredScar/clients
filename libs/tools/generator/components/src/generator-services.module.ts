@@ -112,6 +112,7 @@ export const SYSTEM_SERVICE_PROVIDER = new SafeInjectionToken<SystemServiceProvi
           extension,
           log,
           configService,
+          environment,
         };
       },
       deps: [
